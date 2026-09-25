@@ -1,5 +1,7 @@
 # Gestión de parque de diversiones (PostgreSQL + PL/pgSQL + C con SQL embebido)
 
+> **In English:** A PostgreSQL database for an amusement park that sells day passes. The business rules run inside the database: triggers check the capacity (people in the park and parking spaces) and keep the total of each purchase updated, and a stored procedure registers each sale. A C program with embedded SQL (ECPG) offers a menu and uses transactions. School project made by a team of 4 students (UTEC, 2025).
+
 Base de datos y aplicación de consola para gestionar la venta de pases, el estacionamiento y los accesos de una empresa con cuatro parques de diversiones. Las reglas de negocio se implementan dentro de la base de datos, con triggers, un procedimiento almacenado y funciones en **PL/pgSQL**. Un programa en **C con SQL embebido (ECPG)** ofrece un menú para operar el sistema con transacciones.
 
 Proyecto académico de la unidad curricular *Bases de Datos 2* (Tecnólogo en Informática, UTEC), 2025, realizado en **equipo de 4 integrantes**.
