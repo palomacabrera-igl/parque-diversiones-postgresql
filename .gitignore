@@ -1,0 +1,18 @@
+# Archivos generados al compilar (ecpg + gcc)
+app/programa.c
+programa
+programa.exe
+*.o
+
+# Respaldos de la base y material de la entrega
+*.backup
+*.dump
+*.pdf
+*.zip
+*.7z
+
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,315 @@
+// PROGRAMA EN LENGUAJE C CON SQL EMBEBIDO
+// Este archivo debe ser preprocesado por ecpg y luego compilado con un compilador C.
+#define _XOPEN_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+EXEC SQL INCLUDE sqlca;
+
+/* Manejo de errores */
+EXEC SQL WHENEVER SQLERROR SQLPRINT;
+EXEC SQL WHENEVER SQLWARNING SQLPRINT;
+EXEC SQL WHENEVER NOT FOUND SQLPRINT;
+
+void verificarOCrearPersona(char *ci) {
+    EXEC SQL BEGIN DECLARE SECTION;
+    char persona_ci[9];
+    int existe = 0;
+    char nombre1[50], apellido1[50];
+    EXEC SQL END DECLARE SECTION;
+
+    strncpy(persona_ci, ci, sizeof(persona_ci));
+
+    EXEC SQL SELECT COUNT(*) INTO :existe FROM persona WHERE ci = :persona_ci;
+
+    if (existe == 0) {
+        printf("Persona con CI %s no existe. Ingrese sus datos:\n", persona_ci);
+        printf("Nombre: ");
+        scanf("%49s", nombre1);
+        printf("Apellido: ");
+        scanf("%49s", apellido1);
+
+        EXEC SQL INSERT INTO persona(ci, nombre1, apellido1)
+                 VALUES (:persona_ci, :nombre1, :apellido1);
+    }
+}
+
+void conectar() {
+    EXEC SQL BEGIN DECLARE SECTION;
+    char destino[200];
+    char user[64];
+    char password[128];
+    EXEC SQL END DECLARE SECTION;
+
+    // Las credenciales se leen de variables de entorno (no se guardan en el código)
+    const char *host = getenv("PGHOST") ? getenv("PGHOST") : "localhost";
+    const char *port = getenv("PGPORT") ? getenv("PGPORT") : "5432";
+    const char *env_user = getenv("PGUSER");
+    const char *env_password = getenv("PGPASSWORD");
+
+    if (env_user == NULL || env_password == NULL) {
+        printf("Error: defina las variables de entorno PGUSER y PGPASSWORD antes de ejecutar.\n");
+        exit(1);
+    }
+
+    snprintf(destino, sizeof(destino), "lab02@%s:%s", host, port);
+    snprintf(user, sizeof(user), "%s", env_user);
+    snprintf(password, sizeof(password), "%s", env_password);
+
+    EXEC SQL CONNECT TO :destino USER :user USING :password;
+
+    if (sqlca.sqlcode != 0) {
+        printf("Error al conectar a la base de datos: %s\n", sqlca.sqlerrm.sqlerrmc);
+        exit(1);
+    }
+}
+
+void desconectar() {
+    EXEC SQL COMMIT;
+    EXEC SQL DISCONNECT;
+}
+
+void realizarVenta() {
+    EXEC SQL BEGIN DECLARE SECTION;
+    char ciComprador[9], ciTitular[9], tipoCompra[10], numeroCompra[50];
+    char jsonPases[4000], fechaVisita[11];
+    int usarEstacionamiento, cantidadEstacionamiento = 0;
+    int pase_id_parque, cantidadEntradas;
+    char pase_ci[9];
+    int metodo;
+    int cupo_max = 0, ya_vendidos = 0;
+    int ya_tiene_pase = 0;
+    int cupo_est = 0, usados_est = 0;
+    EXEC SQL END DECLARE SECTION;
+
+    struct tm fecha_tm;
+
+    // 1. Seleccionar parque y validar que exista
+    do {
+        printf("ID del parque: ");
+        scanf("%d", &pase_id_parque);
+
+        EXEC SQL SELECT capacidad_max INTO :cupo_max FROM parque WHERE id_parque = :pase_id_parque;
+
+        if (sqlca.sqlcode == 100) { // No data found
+            printf("Error: El parque con ID %d no existe. Intente nuevamente.\n", pase_id_parque);
+        }
+    } while (sqlca.sqlcode == 100);
+
+    // 2. Fecha única para todos los pases y validación que no sea anterior a hoy
+    do {
+        printf("Fecha de visita (YYYY-MM-DD): ");
+        scanf("%10s", fechaVisita);
+
+        if (strptime(fechaVisita, "%Y-%m-%d", &fecha_tm) == NULL) {
+            printf("Error: Formato de fecha inválido.\n");
+            continue;
+        }
+
+        time_t now = time(NULL);
+        struct tm *hoy = localtime(&now);
+
+        // Comparar fechas ignorando hora
+        fecha_tm.tm_hour = 0; fecha_tm.tm_min = 0; fecha_tm.tm_sec = 0; fecha_tm.tm_isdst = -1;
+        hoy->tm_hour = 0; hoy->tm_min = 0; hoy->tm_sec = 0; hoy->tm_isdst = -1;
+
+        time_t fecha_time = mktime(&fecha_tm);
+        time_t hoy_time = mktime(hoy);
+
+        if (fecha_time < hoy_time) {
+            printf("Error: No se puede seleccionar una fecha anterior a hoy.\n");
+            continue;
+        }
+        break;
+    } while (1);
+
+    // 3. Cantidad de entradas (mínimo 1)
+    do {
+        printf("Cantidad de entradas a comprar: ");
+        scanf("%d", &cantidadEntradas);
+        if (cantidadEntradas < 1)
+            printf("Debe comprar al menos una entrada.\n");
+    } while (cantidadEntradas < 1);
+
+    // 4. Verificar cupo del parque
+    EXEC SQL SELECT COUNT(*) INTO :ya_vendidos
+             FROM pase WHERE id_parque = :pase_id_parque AND fecha = :fechaVisita;
+
+    if (ya_vendidos + cantidadEntradas > cupo_max) {
+        printf("No hay suficientes lugares disponibles en el parque %d para la fecha %s.\n", pase_id_parque, fechaVisita);
+        return;
+    }
+
+    // 5. Construcción del JSON de pases con verificación previa de duplicados
+    strcpy(jsonPases, "[");
+    for (int i = 0; i < cantidadEntradas; i++) {
+        do {
+            printf("CI del visitante %d: ", i + 1);
+            scanf("%8s", pase_ci);
+            if (strlen(pase_ci) != 8 || strspn(pase_ci, "0123456789") != 8) {
+                printf("Error: la cédula debe tener 8 dígitos numéricos.\n");
+                continue;
+            }
+
+            EXEC SQL SELECT COUNT(*) INTO :ya_tiene_pase
+                     FROM pase
+                     WHERE ci = :pase_ci AND id_parque = :pase_id_parque AND fecha = :fechaVisita;
+
+            if (ya_tiene_pase > 0) {
+                printf("La persona con CI %s ya tiene un pase para el parque %d en la fecha %s.\n", pase_ci, pase_id_parque, fechaVisita);
+                continue;
+            }
+            break;
+        } while (1);
+
+        verificarOCrearPersona(pase_ci);
+
+        char pase_json[300];
+        snprintf(pase_json, sizeof(pase_json),
+                 "%s{\"ci\":\"%s\",\"id_parque\":%d,\"fecha\":\"%s\"}",
+                 i == 0 ? "" : ",", pase_ci, pase_id_parque, fechaVisita);
+
+        strcat(jsonPases, pase_json);
+    }
+    strcat(jsonPases, "]");
+
+    // 6. Estacionamiento
+    do {
+        printf("¿Desea reservar estacionamiento? (1 = Sí, 0 = No): ");
+        scanf("%d", &usarEstacionamiento);
+        if (usarEstacionamiento == 1) {
+            do {
+                printf("¿Cuántos lugares?: ");
+                scanf("%d", &cantidadEstacionamiento);
+                if (cantidadEstacionamiento > cantidadEntradas)
+                    printf("Error: No puede reservar más lugares que entradas compradas.\n");
+            } while (cantidadEstacionamiento > cantidadEntradas);
+
+            EXEC SQL SELECT capacidad_max INTO :cupo_est
+                     FROM estacionamiento
+                     WHERE id_parque = :pase_id_parque;
+
+            EXEC SQL SELECT COALESCE(SUM(cantidad), 0) INTO :usados_est
+                     FROM compra_estacionamiento
+                     WHERE id_parque = :pase_id_parque AND fecha = :fechaVisita;
+
+            if (usados_est + cantidadEstacionamiento > cupo_est) {
+                printf("No hay lugar suficiente en el estacionamiento del parque %d para la fecha %s (disponibles: %d).\n",
+                       pase_id_parque, fechaVisita, cupo_est - usados_est);
+                return;
+            }
+        }
+    } while (usarEstacionamiento != 0 && usarEstacionamiento != 1);
+
+    // 7. Datos del comprador y titular
+    do {
+        printf("CI del comprador: ");
+        scanf("%8s", ciComprador);
+    } while (strlen(ciComprador) != 8 || strspn(ciComprador, "0123456789") != 8);
+    verificarOCrearPersona(ciComprador);
+
+    do {
+        printf("CI del titular: ");
+        scanf("%8s", ciTitular);
+    } while (strlen(ciTitular) != 8 || strspn(ciTitular, "0123456789") != 8);
+    verificarOCrearPersona(ciTitular);
+
+    // 8. Tipo de pago
+    do {
+        printf("Tipo de pago:\n1. Débito\n2. Crédito\nSeleccione (1 o 2): ");
+        scanf("%d", &metodo);
+        if (metodo == 1)
+            strcpy(tipoCompra, "debito");
+        else if (metodo == 2)
+            strcpy(tipoCompra, "credito");
+        else
+            printf("Opción inválida. Intente de nuevo.\n");
+    } while (metodo != 1 && metodo != 2);
+
+    // 9. Número de tarjeta
+    printf("Número de tarjeta: ");
+    scanf(" %49[^\n]", numeroCompra);
+
+    // 10. Ejecutar el procedimiento almacenado
+    EXEC SQL CALL realizar_venta(:ciComprador, :ciTitular, :tipoCompra, :numeroCompra,
+                                 :jsonPases, :usarEstacionamiento, :cantidadEstacionamiento);
+
+    if (sqlca.sqlcode < 0) {
+        printf("Error en la venta: %s\n", sqlca.sqlerrm.sqlerrmc);
+        EXEC SQL ROLLBACK;
+    } else {
+        printf("Venta realizada exitosamente.\n");
+        EXEC SQL COMMIT;
+    }
+}
+
+void validarEntrada() {
+    EXEC SQL BEGIN DECLARE SECTION;
+    char ciVisitante[9], fecha[11], resultadoValidacion[200];
+    EXEC SQL END DECLARE SECTION;
+
+    printf("CI del visitante: ");
+    scanf("%8s", ciVisitante);
+    printf("Fecha (YYYY-MM-DD): ");
+    scanf("%10s", fecha);
+
+    EXEC SQL SELECT validar_entrada(:ciVisitante, :fecha) INTO :resultadoValidacion;
+    printf("%s\n", resultadoValidacion);
+}
+
+void obtenerTotalRecaudado() {
+    EXEC SQL BEGIN DECLARE SECTION;
+    int anio, mes;
+    float totalRecaudado;
+    EXEC SQL END DECLARE SECTION;
+
+    printf("Ingrese anio: ");
+    scanf("%d", &anio);
+    printf("Ingrese mes (1-12): ");
+    scanf("%d", &mes);
+
+    EXEC SQL SELECT recaudo(:anio, :mes) INTO :totalRecaudado;
+    printf("Total recaudado: $%.2f\n", totalRecaudado);
+}
+
+
+int main()
+{
+    conectar();
+    int opcion;
+
+    do
+    {
+        printf("\n--- MENU PRINCIPAL ---\n");
+        printf("1. Realizar venta de entradas\n");
+        printf("2. Validar entrada\n");
+        printf("3. Obtener total recaudado\n");
+        printf("4. Salir\n");
+        printf("Seleccione opcion: ");
+        scanf("%d", &opcion);
+
+        switch (opcion)
+        {
+        case 1:
+            realizarVenta();
+            break;
+        case 2:
+            validarEntrada();
+            break;
+        case 3:
+            obtenerTotalRecaudado();
+            break;
+        case 4:
+            printf("Saliendo...\n");
+            break;
+        default:
+            printf("Opcion invalida.\n");
+            break;
+        }
+    } while (opcion != 4);
+
+    desconectar();
+    return 0;
+}
